@@ -1,0 +1,6 @@
+This is not really packaged for re-use. But I thought the code might be
+interesting / helpful for others looking to process long gz streams in C with
+forward seeking, rewind, and ability to ignore the checksum at the end of the
+stream.
+
+License? See LICENSE.
