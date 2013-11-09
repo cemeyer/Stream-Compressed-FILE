@@ -12,6 +12,9 @@
 #undef NDEBUG
 #endif
 
+#ifdef __FreeBSD__
+#include <sys/endian.h>
+#endif
 #include <sys/types.h>
 
 #include <assert.h>
@@ -36,16 +39,24 @@
 	__typeof (b) _b = (b);			\
 	_a < _b ? _a : _b; })
 
+#ifndef __GLIBC__
+typedef int (cookie_read_function_t)(void *, char *, int);
+typedef fpos_t (cookie_seek_function_t)(void *, fpos_t, int);
+typedef int (cookie_close_function_t)(void *);
+#endif
+
 static cookie_read_function_t zfile_read;
 static cookie_seek_function_t zfile_seek;
 static cookie_close_function_t zfile_close;
 
+#ifdef __GLIBC__
 static const cookie_io_functions_t zfile_io = {
 	.read = zfile_read,
 	.write = NULL,
 	.seek = zfile_seek,
 	.close = zfile_close,
 };
+#endif
 
 #define KB (1024)
 struct zfile {
@@ -152,7 +163,11 @@ zopen(const char *path, const char *mode, bool *was_gzipped)
 	
 	zfile_zlib_init(cookie);
 
+#ifdef __GLIBC__
 	res = fopencookie(cookie, mode, zfile_io);
+#else
+	res = funopen(cookie, zfile_read, NULL, zfile_seek, zfile_close);
+#endif
 
 out:
 	if (res == NULL) {
@@ -167,15 +182,31 @@ out:
 
 // Return number of bytes into buf, 0 on EOF, -1 on error. Update
 // stream offset.
-static ssize_t
+static
+#ifdef __GLIBC__
+ssize_t
 zfile_read(void *cookie_, char *buf, size_t size)
+#else
+int
+zfile_read(void *cookie_, char *buf, int size_)
+#endif
 {
 	struct zfile *cookie = cookie_;
 	size_t nb, ignorebytes;
 	ssize_t total = 0;
+#ifndef __GLIBC__
+	size_t size;
+#endif
 	int ret;
 
-	assert(size <= (size_t)INT_MAX);
+#ifdef __GLIBC__
+	assert(size <= INT_MAX);
+#else
+	assert(size_ <= INT_MAX);
+	if (size_ < 0)
+		return -1;
+	size = size_;
+#endif
 
 	if (size == 0)
 		return 0;
@@ -327,19 +358,33 @@ zfile_read(void *cookie_, char *buf, size_t size)
 		}
 	}
 
+#ifndef __GLIBC__
+	assert(total <= INT_MAX);
+#endif
 	return total;
 }
 
-static int
-zfile_seek(void *cookie_, off64_t *offset, int whence)
+static
+#ifdef __GLIBC__
+int
+zfile_seek(void *cookie_, off64_t *offset_, int whence)
+#else
+fpos_t
+zfile_seek(void *cookie_, fpos_t offset, int whence)
+#endif
 {
 	struct zfile *cookie = cookie_;
-	off64_t new_offset = 0;
+#ifdef __GLIBC__
+	off64_t new_offset = 0, offset = *offset_;
+#else
+	fpos_t new_offset = 0;
+	typedef fpos_t off64_t;
+#endif
 
 	if (whence == SEEK_SET) {
-		new_offset = *offset;
+		new_offset = offset;
 	} else if (whence == SEEK_CUR) {
-		new_offset = (off64_t)cookie->logic_offset + *offset;
+		new_offset = (off64_t)cookie->logic_offset + offset;
 	} else {
 		/* SEEK_END not ok */
 		return -1;
@@ -387,9 +432,13 @@ zfile_seek(void *cookie_, off64_t *offset, int whence)
 	}
 
 	assert(cookie->logic_offset == (uint64_t)new_offset);
-	*offset = new_offset;
 
+#ifdef __GLIBC__
+	*offset_ = new_offset;
 	return 0;
+#else
+	return new_offset;
+#endif
 }
 
 static int
