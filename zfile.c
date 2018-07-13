@@ -374,6 +374,7 @@ zfile_seek(void *cookie_, off64_t *offset, int whence)
 		cookie->decode_offset = 0;
 		cookie->logic_offset = 0;
 		zfile_zlib_cleanup(cookie);
+		rewind(cookie->in);
 		zfile_zlib_init(cookie);
 	} else if ((uint64_t)new_offset > cookie->logic_offset) {
 		/* Emulate forward seek by skipping ... */
