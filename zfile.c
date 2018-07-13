@@ -32,8 +32,6 @@
 
 #include "zfile.h"
 
-#define GZ_HDR_SZ 10
-
 #define min(a, b) ({				\
 	__typeof (a) _a = (a);			\
 	__typeof (b) _b = (b);			\
@@ -107,30 +105,27 @@ zfile_zlib_cleanup(struct zfile *cookie)
 }
 
 /*
- * Open gzipped file 'path' as a (forward-)seekable (and rewindable), read-only
- * stream.
+ * Open gzipped FILE stream 'in' as a (forward-)seekable (and rewindable),
+ * read-only stream.
  *
- * If 'path' isn't a gzipped file, you still get a stream.
+ * If 'in' isn't a gzipped file, you still get a stream (the original one is
+ * returned).
  */
 FILE *
-zopen(const char *path, const char *mode, bool *was_gzipped)
+zopenfile(FILE *in, const char *mode, bool *was_gzipped)
 {
-	static const unsigned char gz_magic[] = { 0x1f, 0x8b, 0x08 };
 	unsigned char gzhdr[GZ_HDR_SZ];
 	struct zfile *cookie;
-	FILE *res, *in;
+	FILE *res;
 	size_t nbr;
 
+	res = NULL;
 	cookie = NULL;
-	in = res = NULL;
+
 	if (strstr(mode, "w") || strstr(mode, "a")) {
 		errno = EINVAL;
 		goto out;
 	}
-
-	in = fopen(path, mode);
-	if (in == NULL)
-		goto out;
 
 	/* Check if file is a compressed stream: */
 	nbr = fread(gzhdr, 1, sizeof gzhdr, in);
@@ -143,7 +138,8 @@ zopen(const char *path, const char *mode, bool *was_gzipped)
 	/* If not, just return the original FILE */
 	if (memcmp(gz_magic, gzhdr, sizeof gz_magic) != 0) {
 		rewind(in);
-		*was_gzipped = false;
+		if (was_gzipped != NULL)
+			*was_gzipped = false;
 		return in;
 	}
 
@@ -163,12 +159,32 @@ zopen(const char *path, const char *mode, bool *was_gzipped)
 
 out:
 	if (res == NULL) {
-		if (in != NULL)
-			fclose(in);
 		if (cookie != NULL)
-			free(cookie);
-	} else
+			zfile_zlib_cleanup(cookie);
+		free(cookie);
+	} else if (was_gzipped != NULL)
 		*was_gzipped = true;
+	return res;
+}
+
+/*
+ * Open gzipped file 'path' as a (forward-)seekable (and rewindable), read-only
+ * stream.
+ *
+ * If 'path' isn't a gzipped file, you still get a stream.
+ */
+FILE *
+zopen(const char *path, const char *mode, bool *was_gzipped)
+{
+	FILE *in, *res;
+
+	in = fopen(path, mode);
+	if (in == NULL)
+		return (NULL);
+
+	res = zopenfile(in, mode, was_gzipped);
+	if (res == NULL)
+		fclose(in);
 	return res;
 }
 

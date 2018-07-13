@@ -137,23 +137,19 @@ zstdfile_cleanup(struct zstdfile *cookie)
  * If 'path' isn't a zstd file, you still get a stream.
  */
 FILE *
-zstdopen(const char *path, const char *mode, bool *was_zstd)
+zstdopenfile(FILE *in, const char *mode, bool *was_zstd)
 {
 	unsigned char hdr[4];
 	struct zstdfile *cookie;
-	FILE *res, *in;
+	FILE *res;
 	size_t nbr;
 
 	cookie = NULL;
-	in = res = NULL;
+	res = NULL;
 	if (strstr(mode, "w") || strstr(mode, "a")) {
 		errno = EINVAL;
 		goto out;
 	}
-
-	in = fopen(path, mode);
-	if (in == NULL)
-		goto out;
 
 	/* Check if file is a compressed stream: */
 	nbr = fread(hdr, 1, sizeof(hdr), in);
@@ -168,7 +164,8 @@ zstdopen(const char *path, const char *mode, bool *was_zstd)
 
 	/* If not, just return the original FILE */
 	if (le32dec(hdr) != ZSTD_MAGICNUMBER) {
-		*was_zstd = false;
+		if (was_zstd != NULL)
+			*was_zstd = false;
 		return (in);
 	}
 
@@ -188,14 +185,26 @@ zstdopen(const char *path, const char *mode, bool *was_zstd)
 
 out:
 	if (res == NULL) {
-		if (in != NULL)
-			fclose(in);
-		if (cookie != NULL) {
+		if (cookie != NULL)
 			zstdfile_cleanup(cookie);
-			free(cookie);
-		}
-	} else
+		free(cookie);
+	} else if (was_zstd != NULL)
 		*was_zstd = true;
+	return (res);
+}
+
+FILE *
+zstdopen(const char *path, const char *mode, bool *was_zstd)
+{
+	FILE *res, *in;
+
+	in = fopen(path, mode);
+	if (in == NULL)
+		return (NULL);
+
+	res = zstdopenfile(in, mode, was_zstd);
+	if (res == NULL)
+		fclose(in);
 	return (res);
 }
 
