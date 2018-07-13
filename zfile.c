@@ -156,7 +156,7 @@ zopen(const char *path, const char *mode, bool *was_gzipped)
 	cookie->in = in;
 	cookie->logic_offset = 0;
 	cookie->decode_offset = 0;
-	
+
 	zfile_zlib_init(cookie);
 
 	res = fopencookie(cookie, mode, zfile_io);
