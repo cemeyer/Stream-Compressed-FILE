@@ -68,6 +68,8 @@ struct zfile {
 
 	z_stream decomp;
 
+	uint32_t crc;
+
 	uint8_t inbuf[32*KB];
 	uint8_t outbuf[256*KB];
 	bool eof;
@@ -101,6 +103,8 @@ zfile_zlib_init(struct zfile *cookie)
 
 	cookie->outbuf_start = 0;
 	cookie->eof = false;
+
+	cookie->crc = crc32(0, Z_NULL, 0);
 }
 
 static void
@@ -221,6 +225,8 @@ zfile_read(void *cookie_, char *buf, int size_)
 
 
 	do {
+		size_t inflated;
+
 		/* Drain output buffer first */
 		while (cookie->decomp.next_out >
 		    &cookie->outbuf[cookie->outbuf_start]) {
@@ -297,8 +303,9 @@ zfile_read(void *cookie_, char *buf, int size_)
 			warnx("inflate: %s(%d)", zError(ret), ret);
 			exit(1);
 		}
-		cookie->actual_len +=
-		    (cookie->decomp.next_out - &cookie->outbuf[0]);
+		inflated = cookie->decomp.next_out - &cookie->outbuf[0];
+		cookie->actual_len += inflated;
+		cookie->crc = crc32(cookie->crc, cookie->outbuf, inflated);
 	} while (!feof(cookie->in) && !ferror(cookie->in) && size > 0);
 
 	if (cookie->eof) {
@@ -347,13 +354,19 @@ zfile_read(void *cookie_, char *buf, int size_)
 		gztlr.mlen = le32toh(gztlr.mlen);
 
 		if (gztlr.crc != 0) {
-			warnx("CRC %08x != 0x0", gztlr.crc);
-			exit(1);
+			if (cookie->crc != gztlr.crc) {
+				warnx("Actual CRC %08x does not match gzip "
+				    "CRC %08x; this stream *may* be "
+				    "corrupt. It may be worth investigating "
+				    "anyway.\n", cookie->crc, gztlr.crc);
+			} else
+				warnx("CRC indicates this stream is good: %08x\n",
+				    cookie->crc);
 		}
 
 		if (tlen != gztlr.mlen) {
-			warnx("Length %u (%zu) doesn't match gzip trailer "
-			    "%u!\n", tlen, cookie->actual_len, gztlr.mlen);
+			warnx("Length %u (%zu mod 2**32) doesn't match gzip trailer %u!\n",
+			    tlen, cookie->actual_len, gztlr.mlen);
 			exit(1);
 		}
 	}
