@@ -306,7 +306,7 @@ zfile_read(void *cookie_, char *buf, int size_)
 		inflated = cookie->decomp.next_out - &cookie->outbuf[0];
 		cookie->actual_len += inflated;
 		cookie->crc = crc32(cookie->crc, cookie->outbuf, inflated);
-	} while (!feof(cookie->in) && !ferror(cookie->in) && size > 0);
+	} while (!ferror(cookie->in) && size > 0);
 
 	if (cookie->eof) {
 		uint32_t tlen = (uint32_t)cookie->actual_len;
