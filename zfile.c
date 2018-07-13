@@ -63,6 +63,7 @@ struct zfile {
 	uint8_t inbuf[32*KB];
 	uint8_t outbuf[256*KB];
 	bool eof;
+	bool truncated;
 };
 
 static void
@@ -70,9 +71,8 @@ zfile_zlib_init(struct zfile *cookie)
 {
 	int rc;
 
-	assert(cookie->logic_offset == 0);
-	assert(cookie->decode_offset == 0);
-
+	cookie->logic_offset = 0;
+	cookie->decode_offset = 0;
 	cookie->actual_len = 0;
 
 	rc = fseeko(cookie->in, GZ_HDR_SZ, SEEK_SET);
@@ -93,6 +93,7 @@ zfile_zlib_init(struct zfile *cookie)
 
 	cookie->outbuf_start = 0;
 	cookie->eof = false;
+	cookie->truncated = false;
 
 	cookie->crc = crc32(0, Z_NULL, 0);
 }
@@ -150,9 +151,6 @@ zopenfile(FILE *in, const char *mode, bool *was_gzipped)
 	}
 
 	cookie->in = in;
-	cookie->logic_offset = 0;
-	cookie->decode_offset = 0;
-
 	zfile_zlib_init(cookie);
 
 	res = fopencookie(cookie, mode, zfile_io);
@@ -205,6 +203,14 @@ zfile_read(void *cookie_, char *buf, size_t size)
 
 	if (cookie->eof)
 		return 0;
+	/*
+	 * If the truncated flag is set but eof is not, we noticed the
+	 * truncation after a partial read and had to return (partial) success.
+	 * Proceed through the error path at 'out' to set eof flag, errno, and
+	 * ferror() status on the FILE.
+	 */
+	if (cookie->truncated)
+		goto out;
 
 	ret = Z_OK;
 
@@ -270,12 +276,25 @@ zfile_read(void *cookie_, char *buf, size_t size)
 			nb = fread(cookie->inbuf, 1, sizeof cookie->inbuf,
 			    cookie->in);
 			if (ferror(cookie->in)) {
-				warn("error read core");
-				exit(1);
+				/*
+				 * Handle truncation errors from nested
+				 * compression streams.  Could be a false
+				 * positive if read(2) returned ENOBUFS
+				 * instead, but I don't see any harm.
+				 */
+				if (errno == ENOBUFS) {
+					warnx("Error reading core stream, "
+					    "assuming truncated compression "
+					    "stream");
+					cookie->truncated = true;
+					goto out;
+				} else
+					err(1, "error read core");
 			}
 			if (nb == 0 && feof(cookie->in)) {
-				warn("truncated file");
-				exit(1);
+				warnx("truncated gzip file -- no CRC to check");
+				cookie->truncated = true;
+				goto out;
 			}
 			cookie->decomp.avail_in = nb;
 			cookie->decomp.next_in = cookie->inbuf;
@@ -328,8 +347,10 @@ zfile_read(void *cookie_, char *buf, size_t size)
 			}
 
 			if (rem != 0) {
-				warn("core truncated");
-				exit(1);
+				warnx("truncated gzip file -- lost trailer.  "
+				    "No CRC to check");
+				cookie->truncated = true;
+				goto out;
 			}
 		}
 
@@ -359,7 +380,31 @@ zfile_read(void *cookie_, char *buf, size_t size)
 		}
 	}
 
-	return total;
+out:
+	assert(total <= SSIZE_MAX);
+	/*
+	 * If there's anything left to read, return it as a short read.
+	 */
+	if (total > 0)
+		return (total);
+	/*
+	 * If the stream was truncated, report an error (which will translate
+	 * into ferror() on the stream for consumers).  I checked and it seems
+	 * this will work in both glibc and FreeBSD.  Basically, cookie IO
+	 * functions have the same semantics as syscall IO functions, e.g.,
+	 * read(2).
+	 */
+	if (cookie->truncated) {
+		/*
+		 * Other alternatives considered were EFTYPE (does not exist on
+		 * Linux) or EILSEQ (confusing error string in glibc: "Invalid
+		 * or incomplete multibyte or wide character").
+		 */
+		errno = ENOBUFS;
+		cookie->eof = true;
+		return (-1);
+	}
+	return (0);
 }
 
 static int
@@ -387,8 +432,6 @@ zfile_seek(void *cookie_, off64_t *offset, int whence)
 
 	if (new_offset == 0) {
 		/* rewind(3) */
-		cookie->decode_offset = 0;
-		cookie->logic_offset = 0;
 		zfile_zlib_cleanup(cookie);
 		rewind(cookie->in);
 		zfile_zlib_init(cookie);

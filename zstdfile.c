@@ -76,6 +76,7 @@ struct zstdfile {
 	ZSTD_inBuffer ibuf;
 
 	bool eof;
+	bool truncated;
 };
 
 static void
@@ -83,9 +84,8 @@ zstdfile_init(struct zstdfile *cookie)
 {
 	size_t res;
 
-	assert(cookie->logic_offset == 0);
-	assert(cookie->decode_offset == 0);
-
+	cookie->logic_offset = 0;
+	cookie->decode_offset = 0;
 	cookie->actual_len = 0;
 
 	cookie->decomp = ZSTD_createDCtx();
@@ -115,6 +115,7 @@ zstdfile_init(struct zstdfile *cookie)
 
 	cookie->outbuf_start = 0;
 	cookie->eof = false;
+	cookie->truncated = false;
 }
 
 static void
@@ -176,8 +177,6 @@ zstdopenfile(FILE *in, const char *mode, bool *was_zstd)
 	}
 
 	cookie->in = in;
-	cookie->logic_offset = 0;
-	cookie->decode_offset = 0;
 
 	zstdfile_init(cookie);
 
@@ -225,8 +224,16 @@ zstdfile_read(void *cookie_, char *buf, size_t size)
 
 	if (cookie->eof)
 		return 0;
+	/*
+	 * If the truncated flag is set but eof is not, we noticed the
+	 * truncation after a partial read and had to return (partial) success.
+	 * Proceed through the error path at 'out' to set eof flag, errno, and
+	 * ferror() status on the FILE.
+	 */
+	if (cookie->truncated)
+		goto out;
 
-	ret = 0;
+	ret = 1;
 
 	ignorebytes = cookie->logic_offset - cookie->decode_offset;
 	assert(ignorebytes == 0);
@@ -278,27 +285,14 @@ zstdfile_read(void *cookie_, char *buf, size_t size)
 		assert(cookie->obuf.pos == cookie->outbuf_start);
 
 		/*
-		 * Try to determine if we're done with all compressed input.
-		 * ret == 0 is neccessary but not sufficient; it just
-		 * indicates that we decoded a complete frame last time, and
-		 * there will be many such frames in a core dump.
+		 * When ZSTD_decompressStream() returns zero, it indicates the
+		 * end of a complete *Zstd frame,* which is the equivalent of a
+		 * *zlib stream.*  zlib frames are called blocks in zstd.  Mind
+		 * the terminology gap.
 		 */
-		if (ret == 0 && cookie->ibuf.pos == cookie->ibuf.size) {
-			struct stat sb;
-			off_t off;
-			int rc;
-
-			rc = fstat(fileno(cookie->in), &sb);
-			if (rc != 0)
-				err(1, "fstat");
-			off = ftello(cookie->in);
-			if (off < 0)
-				err(1, "ftello");
-
-			if (off == sb.st_size) {
-				cookie->eof = true;
-				break;
-			}
+		if (ret == 0) {
+			cookie->eof = true;
+			break;
 		}
 
 		/* Read more input if empty */
@@ -306,12 +300,25 @@ zstdfile_read(void *cookie_, char *buf, size_t size)
 			nb = fread(cookie->inbuf, 1, cookie->inbuf_size,
 			    cookie->in);
 			if (ferror(cookie->in)) {
-				warn("error read core");
-				exit(1);
+				/*
+				 * Handle truncation errors from nested
+				 * compression streams.  Could be a false
+				 * positive if read(2) returned ENOBUFS
+				 * instead, but I don't see any harm.
+				 */
+				if (errno == ENOBUFS) {
+					warnx("Error reading core stream, "
+					    "assuming truncated compression "
+					    "stream");
+					cookie->truncated = true;
+					goto out;
+				} else
+					err(1, "error read core");
 			}
 			if (nb == 0 && feof(cookie->in)) {
-				warn("truncated file");
-				exit(1);
+				warnx("truncated zstd stream");
+				cookie->truncated = true;
+				goto out;
 			}
 			cookie->ibuf.pos = 0;
 			cookie->ibuf.size = nb;
@@ -332,8 +339,31 @@ zstdfile_read(void *cookie_, char *buf, size_t size)
 		cookie->actual_len += inflated;
 	} while (!ferror(cookie->in) && size > 0);
 
+out:
 	assert(total <= SSIZE_MAX);
-	return (total);
+	/*
+	 * If there's anything left to read, return it as a short read.
+	 */
+	if (total > 0)
+		return (total);
+	/*
+	 * If the stream was truncated, report an error (which will translate
+	 * into ferror() on the stream for consumers).  I checked and it seems
+	 * this will work in both glibc and FreeBSD.  Basically, cookie IO
+	 * functions have the same semantics as syscall IO functions, e.g.,
+	 * read(2).
+	 */
+	if (cookie->truncated) {
+		/*
+		 * Other alternatives considered were EFTYPE (does not exist on
+		 * Linux) or EILSEQ (confusing error string in glibc: "Invalid
+		 * or incomplete multibyte or wide character").
+		 */
+		errno = ENOBUFS;
+		cookie->eof = true;
+		return (-1);
+	}
+	return (0);
 }
 
 static int
@@ -361,8 +391,6 @@ zstdfile_seek(void *cookie_, off64_t *offset_, int whence)
 
 	if (new_offset == 0) {
 		/* rewind(3) */
-		cookie->decode_offset = 0;
-		cookie->logic_offset = 0;
 		zstdfile_cleanup(cookie);
 		rewind(cookie->in);
 		zstdfile_init(cookie);
