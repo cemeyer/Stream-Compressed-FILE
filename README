@@ -1,6 +1,10 @@
 This is not really packaged for re-use. But I thought the code might be
-interesting / helpful for others looking to process long gz streams in C with
-forward seeking, rewind, and ability to ignore the checksum at the end of the
-stream.
+interesting / helpful for others looking to process long gz/zstd streams in
+C with forward seeking, rewind, and ability to ignore the checksum at the
+end of the stream (gzip only).
+
+Streams may be arbitrarily nested (i.e., gzip of zstd of gzip) but detection
+is not (yet) automatic.  Automated detection can be performed simply by
+repeatedly attempting zopenfile() and zstdopenfile().
 
 License? See LICENSE.
